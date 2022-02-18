@@ -11,6 +11,7 @@ from torchvision import transforms, utils
 import cv2
 import random
 import pickle
+import numpy as np
 
 # Ignore warnings
 import warnings
@@ -23,7 +24,7 @@ def read_resize(imname, shape):
 
 # pts are circular -> (x1,y1), (x2,y1), (x2,y2), (x1,y2)
 def crop_patch(img, pts):
-    pts = pts.astype(np.int32)
+    pts = np.rint(pts).astype(np.int32)
     x1,y1 = pts[0]
     x2,y2 = pts[2]
     return img[y1:y2, x1:x2, :]
@@ -58,12 +59,15 @@ def warp_points(pts, H):
 
 class HomographyDataset(Dataset):
 
-    def __init__(self, dirpath, generate=True, transform=None):
+    def __init__(self, dirpath, generate=True, transform=None, name="train"):
         self.transform = transform
         imnames = glob.glob(dirpath + "/*.jpg")
         if generate:
             self.info = list()
-            for i in range(500000):
+            num = 500000 if name=="train" else 5000
+            for i in range(num):
+                if i % 1000 == 0:
+                    print("Completed ", i)
                 IAimname = random.choice(imnames)
                 IA = read_resize(IAimname, (320,240))
                 centerA = getPatchPoint(IA)
@@ -87,11 +91,14 @@ class HomographyDataset(Dataset):
                 # cv2.imwrite("p2.jpg", p2)
 
                 self.info.append([IAimname, ptsA, error, H_AB, H_BA, ptsB, centerA, centerB])
-            pickle.dump(self.info, open("../../Data/homography_data.pkl", "wb"))
+            pickle.dump(self.info, open(f"/vulcanscratch/sonaalk/Stitching/Phase2/Data/homography_data_{name}.pkl", "wb"))
         
         else:
-            self.info = pickle.load(open("../../Data/homography_data.pkl", "rb"))
-    
+            self.info = pickle.load(open(f"/vulcanscratch/sonaalk/Stitching/Phase2/Data/homography_data_{name}.pkl", "rb"))
+
+        #if name == "train":
+        #    self.info = self.info[:100000]
+
     def __len__(self):
         return len(self.info)
     
@@ -101,14 +108,15 @@ class HomographyDataset(Dataset):
         IB = cv2.warpPerspective(IA, H_BA, (320,240))
         pA = crop_patch(IA, ptsA)
         pB = crop_patch(IB, ptsB)
-
-        gt = error
+        # try:
+        gt = error 
 
         pA = self.transform(pA)
         pB = self.transform(pB)
-        
         X = torch.cat([pA,pB], axis=0)
-
+        # except:
+        #     import pdb;pdb.set_trace()
+            
         return X, gt
 
 
@@ -121,7 +129,18 @@ if __name__ == '__main__':
         transforms.Normalize((0.5), (0.5)),
         ])
 
-    H = HomographyDataset('../../Data/Train', transform=T)
-    X, gt = H.__getitem__(0)
-    p1 = X[:,:,0]
-    p2 = X[:,:,1]
+    H = HomographyDataset('/vulcanscratch/sonaalk/Stitching/Phase2/Data/Train', generate=False, transform=T)
+    l = list()
+    for i in range(101566, len(H)):
+        print(i, len(l))
+        try:
+            H.__getitem__(i)
+        except:
+            l.append(i)
+    
+
+    import pdb;pdb.set_trace()
+
+    # X, gt = H.__getitem__(0)
+    # p1 = X[:,:,0]
+    # p2 = X[:,:,1]
