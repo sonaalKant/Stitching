@@ -1,8 +1,13 @@
 
 # Training Supervised Model
-val Dataset, Average Loss : 0.10747486331497137
-test Dataset, Average Loss : 0.10672151242582181
+python Train.py --ModelName Sup
+
+# Testing Supervised Model
+python Test.py
 
 # Training Unsupervised Model
-val Dataset, Average Loss : 2.8052815134152054
-test Dataset, Average Loss : 2.8055725029101386
+python Train.py --ModelName Unsup
+
+# Testing Unsupervised Model
+python Test.py --ModelPath /vulcanscratch/sonaalk/Stitching/Phase2/Checkpoints/unsupervised_small/checkpint_5.pt --ModelType Unsup
+
