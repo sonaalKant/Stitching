@@ -17,9 +17,10 @@ University of Maryland, College Park
 # skimage, do (apt install python-skimage)
 # termcolor, do (pip install termcolor)
 
+from ast import Mod
 import sys
 import os
-from Network.Network import HomographyModel
+from Network.Network import HomographyModel, HomographyModelUnsupervised, normalize
 from Misc.MiscUtils import *
 from Misc.DataUtils import *
 import argparse
@@ -32,6 +33,17 @@ import wandb
 
 # Don't generate pyc codes
 sys.dont_write_bytecode = True
+
+def load_my_state_dict(model, state_dict):
+
+	own_state = model.state_dict()
+	for name, param in state_dict.items():
+		if name not in own_state:
+				continue
+		if isinstance(param, nn.Parameter):
+			# backwards compatibility for serialized parameters
+			param = param.data
+		own_state[name].copy_(param)
 
 def PrettyPrint(NumEpochs, MiniBatchSize, NumTrainSamples, NumValSamples):
 	"""
@@ -80,23 +92,51 @@ def TrainOperation(DirNamesTrain, DirNamesVal, NumEpochs, MiniBatchSize, CheckPo
 	
 	PrettyPrint(NumEpochs, MiniBatchSize, len(train_dataset), len(val_dataset))
 
-	model = HomographyModel().cuda()
+	if ModelType == 'Sup':
+		model = HomographyModel().cuda()
+		criterion = nn.MSELoss()
+	elif ModelType == 'Unsup':
+		model = HomographyModelUnsupervised().cuda()
+		model.load_state_dict(torch.load("/vulcanscratch/sonaalk/Stitching/Phase2/Checkpoints/supervised_large_normalized/checkpint_17.pt"))
+		criterion = nn.L1Loss()
+		criterion2 = nn.MSELoss()
 
-	criterion = nn.MSELoss()
-	optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
-
+	model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+	params = sum([np.prod(p.size()) for p in model_parameters])
+	print("Num Parameters : ", params)
+	
+	optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+	torch.autograd.set_detect_anomaly(True)
 	for i in range(NumEpochs):
 		model.train()
 		train_loss = 0.
-		for idx, (input, H_gt) in enumerate(train_dataloader):
+		train_loss2 = 0.
+		for idx, (input, H_gt, ptsA, _) in enumerate(train_dataloader):
 			input = input.cuda()
 			H_gt = H_gt.cuda()
-			H_pred = model(input)
-			H_gt = H_gt.view(H_gt.shape[0],-1)
-			loss = criterion(H_pred, H_gt)
+			if ModelType == 'Sup':
+				H_pred = model(input)
+				H_gt = H_gt.view(H_gt.shape[0],-1)
+				loss = criterion(H_pred, H_gt)
+			if ModelType == 'Unsup':
+				ptsA = ptsA.cuda()
+				pA, pB = torch.chunk(input, dim=1, chunks=2)				
+				IB_pred , error = model(input, ptsA, pA)
+				loss = criterion(IB_pred, pB)
+				loss2 = criterion(error, H_gt)
+				train_loss2 += loss2.item()
+			
 			train_loss += loss.item()
 			optimizer.zero_grad()
 			loss.backward()
+			# ave_grads = []
+			# max_grads= []
+			# layers = []
+			# for n, p in model.named_parameters():
+			# 	if(p.requires_grad) and ("bias" not in n):
+			# 		layers.append(n)
+			# 		ave_grads.append(p.grad.abs().mean())
+			# 		max_grads.append(p.grad.abs().max())
 			optimizer.step()
 
 			if idx % 10 == 0:
@@ -104,17 +144,28 @@ def TrainOperation(DirNamesTrain, DirNamesVal, NumEpochs, MiniBatchSize, CheckPo
 				with torch.no_grad():
 					model.eval()
 					val_loss = 0.
-					for idx1, (input, H_gt) in enumerate(val_dataloader):
+					val_loss2 = 0.
+					for idx1, (input, H_gt, ptsA, _) in enumerate(val_dataloader):
 						input = input.cuda()
 						H_gt = H_gt.cuda()
-						H_pred = model(input)
-						H_gt = H_gt.view(H_gt.shape[0],-1)
-						loss = criterion(H_pred, H_gt)
+						if ModelType == 'Sup':
+							H_pred = model(input)
+							H_gt = H_gt.view(H_gt.shape[0],-1)
+							loss = criterion(H_pred, H_gt)
+						if ModelType == 'Unsup':
+							ptsA = ptsA.cuda()
+							pA, pB = torch.chunk(input, dim=1, chunks=2)
+							IB_pred, error = model(input, ptsA, pA)
+							loss = criterion(IB_pred, pB)
+							loss2 = criterion(error, H_gt)
+							val_loss2 += loss2.item()
+							
 						val_loss += loss.item()
 					
 					val_loss_avg = val_loss / (idx1 +1)
+					val_loss_avg2 = val_loss2 / (idx1 +1)
 
-					print(f"Epoch : {i}, Iter : {idx}, Train Loss : {train_loss_avg}, Val Loss : {val_loss_avg}")
+					print(f"Epoch : {i}, Iter : {idx}, Train Loss : {train_loss_avg}, Val Loss : {val_loss_avg}, Val Loss 2 : {val_loss_avg2}")
 					
 					wandb.log({'train_loss' : train_loss_avg, 'val_loss' : val_loss_avg, 'epoch' : i })
 				
@@ -153,7 +204,7 @@ def main():
 	CheckPointPath = os.path.join(Args.CheckPointPath, Args.RunName)
 	ModelType = Args.ModelType
 
-	wandb.init(project="Stitching", entity="sonaalk")
+	wandb.init(project="Stitching", entity="sonaalk",settings=wandb.Settings(start_method="fork"))
 	wandb.run.name = Args.RunName
 	wandb.config.update(Args)
 	

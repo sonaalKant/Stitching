@@ -61,6 +61,11 @@ class HomographyDataset(Dataset):
 
     def __init__(self, dirpath, generate=True, transform=None, name="train"):
         self.transform = transform
+        self.transform2 = transforms.Compose([
+                        transforms.ToTensor(),
+                        transforms.Normalize((0.5), (0.5)),
+                        ])
+        
         imnames = glob.glob(dirpath + "/*.jpg")
         if generate:
             self.info = list()
@@ -96,8 +101,8 @@ class HomographyDataset(Dataset):
         else:
             self.info = pickle.load(open(f"/vulcanscratch/sonaalk/Stitching/Phase2/Data/homography_data_{name}.pkl", "rb"))
 
-        #if name == "train":
-        #    self.info = self.info[:100000]
+        if name == "train":
+           self.info = self.info[:10000]
 
     def __len__(self):
         return len(self.info)
@@ -109,7 +114,7 @@ class HomographyDataset(Dataset):
         pA = crop_patch(IA, ptsA)
         pB = crop_patch(IB, ptsB)
         # try:
-        gt = error 
+        gt = error / 32.
 
         pA = self.transform(pA)
         pB = self.transform(pB)
@@ -117,7 +122,7 @@ class HomographyDataset(Dataset):
         # except:
         #     import pdb;pdb.set_trace()
             
-        return X, gt
+        return X, gt, ptsA, self.transform2(IA)
 
 
 if __name__ == '__main__':
@@ -129,9 +134,9 @@ if __name__ == '__main__':
         transforms.Normalize((0.5), (0.5)),
         ])
 
-    H = HomographyDataset('/vulcanscratch/sonaalk/Stitching/Phase2/Data/Train', generate=False, transform=T)
+    H = HomographyDataset('/vulcanscratch/sonaalk/Stitching/P1TestSet/Phase2/', generate=True, transform=T, name="test")
     l = list()
-    for i in range(101566, len(H)):
+    for i in range(0, len(H)):
         print(i, len(l))
         try:
             H.__getitem__(i)

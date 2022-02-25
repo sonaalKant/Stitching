@@ -17,166 +17,121 @@ University of Maryland, College Park
 # opencv, do (pip install opencv-python)
 # skimage, do (apt install python-skimage)
 
-import tensorflow as tf
-import cv2
-import os
+from ast import Mod
 import sys
-import glob
-import Misc.ImageUtils as iu
-import random
-from skimage import data, exposure, img_as_float
-import matplotlib.pyplot as plt
-from Network.Network import HomographyModel
+import os
+from Network.Network import HomographyModel, HomographyModelUnsupervised, normalize
 from Misc.MiscUtils import *
-import numpy as np
-import time
+from Misc.DataUtils import *
 import argparse
-import shutil
-from StringIO import StringIO
-import string
-import math as m
-from tqdm import tqdm
-from Misc.TFSpatialTransformer import *
+from Dataset.dataCreation import HomographyDataset
+from torchvision import transforms, utils
+from torch.utils.data import DataLoader
+import torch
+import torch.nn as nn
+import cv2
 
 
 # Don't generate pyc codes
 sys.dont_write_bytecode = True
 
-def SetupAll(BasePath):
-    """
-    Inputs: 
-    BasePath - Path to images
-    Outputs:
-    ImageSize - Size of the Image
-    DataPath - Paths of all images where testing will be run on
-    """   
-    # Image Input Shape
-    ImageSize = [32, 32, 3]
-    DataPath = []
-    NumImages = len(glob.glob(BasePath+'*.jpg'))
-    SkipFactor = 1
-    for count in range(1,NumImages+1,SkipFactor):
-        DataPath.append(BasePath + str(count) + '.jpg')
+def unnormalize(img):
+	img = img.permute(1,2,0).cpu().numpy()
+	img = img - img.min()
+	img = img / img.max()
+	return (img*255).astype(np.uint8)
 
-    return ImageSize, DataPath
-    
-def ReadImages(ImageSize, DataPath):
-    """
-    Inputs: 
-    ImageSize - Size of the Image
-    DataPath - Paths of all images where testing will be run on
-    Outputs:
-    I1Combined - I1 image after any standardization and/or cropping/resizing to ImageSize
-    I1 - Original I1 image for visualization purposes only
-    """
-    
-    ImageName = DataPath
-    
-    I1 = cv2.imread(ImageName)
-    
-    if(I1 is None):
-        # OpenCV returns empty list if image is not read! 
-        print('ERROR: Image I1 cannot be read')
-        sys.exit()
-        
-    ##########################################################################
-    # Add any standardization or cropping/resizing if used in Training here!
-    ##########################################################################
+def save_visualizations(Images, H_gt, H_pred, ptsA, save_path):
+	if not os.path.isdir(save_path):
+		os.makedirs(save_path)
+	
+	for j in range(Images.shape[0]):
+		
+		img = unnormalize(Images[j])
+		
+		base_pts= (ptsA[j]).cpu().numpy().reshape(-1,1,2).astype(np.int32)
+		
+		gt_pts= (H_gt[j]*32).cpu().numpy().reshape(-1,1,2).astype(np.int32)
+		pred_pts= (H_pred[j]*32).cpu().numpy().reshape(-1,1,2).astype(np.int32)
 
-    I1S = iu.StandardizeInputs(np.float32(I1))
+		gt_pts = gt_pts + base_pts
+		pred_pts = pred_pts + base_pts
 
-    I1Combined = np.expand_dims(I1S, axis=0)
+		img = cv2.polylines(img.copy(), [gt_pts], True, (0,0,255), 2)
+		img= cv2.polylines(img, [pred_pts], True, (255,0,0), 2)
 
-    return I1Combined, I1
-                
-
-def TestOperation(ImgPH, ImageSize, ModelPath, DataPath, LabelsPathPred):
-    """
-    Inputs: 
-    ImgPH is the Input Image placeholder
-    ImageSize is the size of the image
-    ModelPath - Path to load trained model from
-    DataPath - Paths of all images where testing will be run on
-    LabelsPathPred - Path to save predictions
-    Outputs:
-    Predictions written to ./TxtFiles/PredOut.txt
-    """
-    Length = ImageSize[0]
-    # Predict output with forward pass, MiniBatchSize for Test is 1
-    _, prSoftMaxS = CIFAR10Model(ImgPH, ImageSize, 1)
-
-    # Setup Saver
-    Saver = tf.train.Saver()
-
-    
-    with tf.Session() as sess:
-        Saver.restore(sess, ModelPath)
-        print('Number of parameters in this model are %d ' % np.sum([np.prod(v.get_shape().as_list()) for v in tf.trainable_variables()]))
-        
-        OutSaveT = open(LabelsPathPred, 'w')
-
-        for count in tqdm(range(np.size(DataPath))):            
-            DataPathNow = DataPath[count]
-            Img, ImgOrg = ReadImages(ImageSize, DataPathNow)
-            FeedDict = {ImgPH: Img}
-            PredT = np.argmax(sess.run(prSoftMaxS, FeedDict))
-
-            OutSaveT.write(str(PredT)+'\n')
-            
-        OutSaveT.close()
+		cv2.imwrite(f"{save_path}/{j}.jpg", img)
 
 
-def ReadLabels(LabelsPathTest, LabelsPathPred):
-    if(not (os.path.isfile(LabelsPathTest))):
-        print('ERROR: Test Labels do not exist in '+LabelsPathTest)
-        sys.exit()
-    else:
-        LabelTest = open(LabelsPathTest, 'r')
-        LabelTest = LabelTest.read()
-        LabelTest = map(float, LabelTest.split())
+def TestOperation(ModelPath, ModelType, BasePath, MiniBatchSize):
+	transform =  transforms.Compose([
+	transforms.ToPILImage(),
+	transforms.Grayscale(),
+	transforms.ToTensor(),
+	transforms.Normalize((0.5), (0.5)),
+	])
 
-    if(not (os.path.isfile(LabelsPathPred))):
-        print('ERROR: Pred Labels do not exist in '+LabelsPathPred)
-        sys.exit()
-    else:
-        LabelPred = open(LabelsPathPred, 'r')
-        LabelPred = LabelPred.read()
-        LabelPred = map(float, LabelPred.split())
-        
-    return LabelTest, LabelPred
+	if ModelType == 'Sup':
+		model = HomographyModel().cuda()
+	elif ModelType == 'Unsup':
+		model = HomographyModelUnsupervised().cuda()
+	
+	criterion = nn.MSELoss()
 
-        
+	model.load_state_dict(torch.load(ModelPath))
+
+	for name in ["val", "test"]:
+		test_dataset = HomographyDataset(BasePath, generate=False, transform=transform, name=name)
+
+		test_dataloader = DataLoader(test_dataset, batch_size=MiniBatchSize,
+							shuffle=False, num_workers=4)
+
+		with torch.no_grad():
+			model.eval()
+			val_loss = 0.
+			for idx1, (input, H_gt, ptsA, IA) in enumerate(test_dataloader):
+				input = input.cuda()
+				H_gt = H_gt.cuda()
+				if ModelType == 'Sup':
+					H_pred = model(input)
+					H_gt = H_gt.view(H_gt.shape[0],-1)
+				if ModelType == 'Unsup':
+					ptsA = ptsA.cuda()
+					pA, pB = torch.chunk(input, dim=1, chunks=2)
+					_, H_pred = model(input, ptsA, pA)
+				
+				loss = criterion(H_pred, H_gt)
+				val_loss += loss.item()
+			
+			save_visualizations(IA, H_gt, H_pred, ptsA, save_path=f"viz/{ModelType}/{name}")
+			
+			val_loss_avg = val_loss / (idx1 +1)
+		
+		print(f"{name} Dataset, Average Loss : {val_loss_avg}")
+		
+
 def main():
-    """
-    Inputs: 
-    None
-    Outputs:
-    Prints out the confusion matrix with accuracy
-    """
+	"""
+	Inputs: 
+	None
+	Outputs:
+	Prints out the confusion matrix with accuracy
+	"""
 
-    # Parse Command Line arguments
-    Parser = argparse.ArgumentParser()
-    Parser.add_argument('--ModelPath', dest='ModelPath', default='/home/chahatdeep/Downloads/Checkpoints/144model.ckpt', help='Path to load latest model from, Default:ModelPath')
-    Parser.add_argument('--BasePath', dest='BasePath', default='/home/chahatdeep/Downloads/aa/CMSC733HW0/CIFAR10/Test/', help='Path to load images from, Default:BasePath')
-    Parser.add_argument('--LabelsPath', dest='LabelsPath', default='./TxtFiles/LabelsTest.txt', help='Path of labels file, Default:./TxtFiles/LabelsTest.txt')
-    Args = Parser.parse_args()
-    ModelPath = Args.ModelPath
-    BasePath = Args.BasePath
-    LabelsPath = Args.LabelsPath
+	# Parse Command Line arguments
+	Parser = argparse.ArgumentParser()
+	Parser.add_argument('--ModelPath', dest='ModelPath', default='/vulcanscratch/sonaalk/Stitching/Phase2/Checkpoints/supervised_large_normalized/checkpint_17.pt', help='Path to load latest model from, Default:ModelPath')
+	Parser.add_argument('--BasePath', dest='BasePath', default='/vulcanscratch/sonaalk/Stitching/P1TestSet/Phase2/', help='Path to load Data')
+	Parser.add_argument('--ModelType', dest='ModelType', default='Sup', help='Use Sup or Unsup')
+	Args = Parser.parse_args()
+	ModelPath = Args.ModelPath
+	BasePath = Args.BasePath
+	ModelType = Args.ModelType
 
-    # Setup all needed parameters including file reading
-    ImageSize, DataPath = SetupAll(BasePath)
+	MiniBatchSize = 16
 
-    # Define PlaceHolder variables for Input and Predicted output
-    ImgPH = tf.placeholder('float', shape=(1, ImageSize[0], ImageSize[1], 3))
-    LabelsPathPred = './TxtFiles/PredOut.txt' # Path to save predicted labels
-
-    TestOperation(ImgPH, ImageSize, ModelPath, DataPath, LabelsPathPred)
-
-    # Plot Confusion Matrix
-    LabelsTrue, LabelsPred = ReadLabels(LabelsPath, LabelsPathPred)
-    ConfusionMatrix(LabelsTrue, LabelsPred)
-     
+	TestOperation(ModelPath, ModelType, BasePath, MiniBatchSize)
+	 
 if __name__ == '__main__':
-    main()
+	main()
  
